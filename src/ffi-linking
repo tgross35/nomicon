@@ -1,3 +1,46 @@
+## Foreign calling conventions
+
+Most foreign code exposes a C ABI, and Rust uses the platform's C calling convention by default when
+calling foreign functions. Some foreign functions, most notably the Windows API, use other calling
+conventions. Rust provides a way to tell the compiler which convention to use:
+
+<!-- ignore: requires libc crate -->
+```rust,ignore
+#[cfg(all(target_os = "win32", target_arch = "x86"))]
+#[link(name = "kernel32")]
+#[allow(non_snake_case)]
+extern "stdcall" {
+    fn SetEnvironmentVariableA(n: *const u8, v: *const u8) -> libc::c_int;
+}
+# fn main() { }
+```
+
+This applies to the entire `extern` block. The list of supported ABI constraints
+are:
+
+* `stdcall`
+* `aapcs`
+* `cdecl`
+* `fastcall`
+* `vectorcall`
+This is currently hidden behind the `abi_vectorcall` gate and is subject to change.
+* `Rust`
+* `rust-intrinsic`
+* `system`
+* `C`
+* `win64`
+* `sysv64`
+
+Most of the abis in this list are self-explanatory, but the `system` abi may
+seem a little odd. This constraint selects whatever the appropriate ABI is for
+interoperating with the target's libraries. For example, on win32 with a x86
+architecture, this means that the abi used would be `stdcall`. On x86_64,
+however, windows uses the `C` calling convention, so `C` would be used. This
+means that in our previous example, we could have used `extern "system" { ... }`
+to define a block for all windows systems, not only x86 ones.
+
+
+
 ## Linking
 
 The `link` attribute on `extern` blocks provides the basic building block for
