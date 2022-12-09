@@ -1,0 +1,167 @@
+
+## Interoperability with foreign code
+
+Rust guarantees that the layout of a `struct` is compatible with the platform's
+representation in C only if the `#[repr(C)]` attribute is applied to it.
+`#[repr(C, packed)]` can be used to lay out struct members without padding.
+`#[repr(C)]` can also be applied to an enum.
+
+Rust's owned boxes (`Box<T>`) use non-nullable pointers as handles which point
+to the contained object. However, they should not be manually created because
+they are managed by internal allocators. References can safely be assumed to be
+non-nullable pointers directly to the type.  However, breaking the borrow
+checking or mutability rules is not guaranteed to be safe, so prefer using raw
+pointers (`*`) if that's needed because the compiler can't make as many
+assumptions about them.
+
+Vectors and strings share the same basic memory layout, and utilities are
+available in the `vec` and `str` modules for working with C APIs. However,
+strings are not terminated with `\0`. If you need a NUL-terminated string for
+interoperability with C, you should use the `CString` type in the `std::ffi`
+module.
+
+The [`libc` crate on crates.io][libc] includes type aliases and function
+definitions for the C standard library in the `libc` module, and Rust links
+against `libc` and `libm` by default.
+
+
+
+## The "nullable pointer optimization"
+
+Certain Rust types are defined to never be `null`. This includes references (`&T`,
+`&mut T`), boxes (`Box<T>`), and function pointers (`extern "abi" fn()`). When
+interfacing with C, pointers that might be `null` are often used, which would seem to
+require some messy `transmute`s and/or unsafe code to handle conversions to/from Rust types.
+However, the language provides a workaround.
+
+As a special case, an `enum` is eligible for the "nullable pointer optimization" if it contains
+exactly two variants, one of which contains no data and the other contains a field of one of the
+non-nullable types listed above.  This means no extra space is required for a discriminant; rather,
+the empty variant is represented by putting a `null` value into the non-nullable field. This is
+called an "optimization", but unlike other optimizations it is guaranteed to apply to eligible
+types.
+
+The most common type that takes advantage of the nullable pointer optimization is `Option<T>`,
+where `None` corresponds to `null`. So `Option<extern "C" fn(c_int) -> c_int>` is a correct way
+to represent a nullable function pointer using the C ABI (corresponding to the C type
+`int (*)(int)`).
+
+Here is a contrived example. Let's say some C library has a facility for registering a
+callback, which gets called in certain situations. The callback is passed a function pointer
+and an integer and it is supposed to run the function with the integer as a parameter. So
+we have function pointers flying across the FFI boundary in both directions.
+
+<!-- ignore: requires libc crate -->
+```rust,ignore
+use libc::c_int;
+
+# #[cfg(hidden)]
+extern "C" {
+    /// Registers the callback.
+    fn register(cb: Option<extern "C" fn(Option<extern "C" fn(c_int) -> c_int>, c_int) -> c_int>);
+}
+# unsafe fn register(_: Option<extern "C" fn(Option<extern "C" fn(c_int) -> c_int>,
+#                                            c_int) -> c_int>)
+# {}
+
+/// This fairly useless function receives a function pointer and an integer
+/// from C, and returns the result of calling the function with the integer.
+/// In case no function is provided, it squares the integer by default.
+extern "C" fn apply(process: Option<extern "C" fn(c_int) -> c_int>, int: c_int) -> c_int {
+    match process {
+        Some(f) => f(int),
+        None    => int * int
+    }
+}
+
+fn main() {
+    unsafe {
+        register(Some(apply));
+    }
+}
+```
+
+And the code on the C side looks like this:
+
+```c
+void register(int (*f)(int (*)(int), int)) {
+    ...
+}
+```
+
+No `transmute` required!
+
+## Representing opaque structs
+
+Sometimes, a C library wants to provide a pointer to something, but not let you know the internal details of the thing it wants.
+A stable and simple way is to use a `void *` argument:
+
+```c
+void foo(void *arg);
+void bar(void *arg);
+```
+
+We can represent this in Rust with the `c_void` type:
+
+<!-- ignore: requires libc crate -->
+```rust,ignore
+extern "C" {
+    pub fn foo(arg: *mut libc::c_void);
+    pub fn bar(arg: *mut libc::c_void);
+}
+# fn main() {}
+```
+
+This is a perfectly valid way of handling the situation. However, we can do a bit
+better. To solve this, some C libraries will instead create a `struct`, where
+the details and memory layout of the struct are private. This gives some amount
+of type safety. These structures are called ‘opaque’. Here’s an example, in C:
+
+```c
+struct Foo; /* Foo is a structure, but its contents are not part of the public interface */
+struct Bar;
+void foo(struct Foo *arg);
+void bar(struct Bar *arg);
+```
+
+To do this in Rust, let’s create our own opaque types:
+
+```rust
+#[repr(C)]
+pub struct Foo {
+    _data: [u8; 0],
+    _marker:
+        core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
+#[repr(C)]
+pub struct Bar {
+    _data: [u8; 0],
+    _marker:
+        core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
+
+extern "C" {
+    pub fn foo(arg: *mut Foo);
+    pub fn bar(arg: *mut Bar);
+}
+# fn main() {}
+```
+
+By including at least one private field and no constructor,
+we create an opaque type that we can't instantiate outside of this module.
+(A struct with no field could be instantiated by anyone.)
+We also want to use this type in FFI, so we have to add `#[repr(C)]`.
+The marker ensures the compiler does not mark the struct as `Send`, `Sync` and `Unpin` are
+not applied to the struct. (`*mut u8` is not `Send` or `Sync`, `PhantomPinned` is not `Unpin`)
+
+But because our `Foo` and `Bar` types are
+different, we’ll get type safety between the two of them, so we cannot
+accidentally pass a pointer to `Foo` to `bar()`.
+
+Notice that it is a really bad idea to use an empty enum as FFI type.
+The compiler relies on empty enums being uninhabited, so handling values of type
+`&Empty` is a huge footgun and can lead to buggy program behavior (by triggering
+undefined behavior).
+
+> **NOTE:** The simplest way would use "extern types".
+But it's currently (as of June 2021) unstable and has some unresolved questions, see the [RFC page][extern-type-rfc] and the [tracking issue][extern-type-issue] for more details.
