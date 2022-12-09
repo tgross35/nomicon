@@ -46,3 +46,28 @@ fn main() {
 
 Note that all interaction with a `static mut` is unsafe, both reading and
 writing. Dealing with global mutable state requires a great deal of care.
+
+## Variadic functions
+
+In C, functions can be 'variadic', meaning they accept a variable number of arguments. This can
+be achieved in Rust by specifying `...` within the argument list of a foreign function declaration:
+
+```no_run
+extern {
+    fn foo(x: i32, ...);
+}
+
+fn main() {
+    unsafe {
+        foo(10, 20, 30, 40, 50);
+    }
+}
+```
+
+Normal Rust functions can *not* be variadic:
+
+```rust,compile_fail
+// This will not compile
+
+fn foo(x: i32, ...) {}
+```
