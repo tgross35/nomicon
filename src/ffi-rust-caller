@@ -1,0 +1,61 @@
+# Calling foreign functions
+
+The following is a minimal example of calling a foreign function which will
+compile if snappy is installed:
+
+<!-- ignore: requires libc crate -->
+```rust,ignore
+use libc::size_t;
+
+#[link(name = "snappy")]
+extern {
+    fn snappy_max_compressed_length(source_length: size_t) -> size_t;
+}
+
+fn main() {
+    let x = unsafe { snappy_max_compressed_length(100) };
+    println!("max compressed length of a 100 byte buffer: {}", x);
+}
+```
+
+The `extern` block is a list of function signatures in a foreign library, in
+this case with the platform's C ABI. The `#[link(...)]` attribute is used to
+instruct the linker to link against the snappy library so the symbols are
+resolved.
+
+Foreign functions are assumed to be unsafe so calls to them need to be wrapped
+with `unsafe {}` as a promise to the compiler that everything contained within
+truly is safe. C libraries often expose interfaces that aren't thread-safe, and
+almost any function that takes a pointer argument isn't valid for all possible
+inputs since the pointer could be dangling, and raw pointers fall outside of
+Rust's safe memory model.
+
+When declaring the argument types to a foreign function, the Rust compiler
+cannot check if the declaration is correct, so specifying it correctly is part
+of keeping the binding correct at runtime.
+
+The `extern` block can be extended to cover the entire snappy API:
+
+<!-- ignore: requires libc crate -->
+```rust,ignore
+use libc::{c_int, size_t};
+
+#[link(name = "snappy")]
+extern {
+    fn snappy_compress(input: *const u8,
+                       input_length: size_t,
+                       compressed: *mut u8,
+                       compressed_length: *mut size_t) -> c_int;
+    fn snappy_uncompress(compressed: *const u8,
+                         compressed_length: size_t,
+                         uncompressed: *mut u8,
+                         uncompressed_length: *mut size_t) -> c_int;
+    fn snappy_max_compressed_length(source_length: size_t) -> size_t;
+    fn snappy_uncompressed_length(compressed: *const u8,
+                                  compressed_length: size_t,
+                                  result: *mut size_t) -> c_int;
+    fn snappy_validate_compressed_buffer(compressed: *const u8,
+                                         compressed_length: size_t) -> c_int;
+}
+# fn main() {}
+```
